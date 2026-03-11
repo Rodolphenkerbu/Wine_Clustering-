@@ -1,0 +1,29 @@
+# --- Python cache & environment ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+py310/
+.py310/
+.venv/
+venv/
+env/
+
+# --- Data & models ---
+data/
+models/
+
+# --- Jupyter Notebook junk ---
+.ipynb_checkpoints/
+
+# --- Logs & temp files ---
+*.log
+*.tmp
+*.cache/
+
+# --- VS Code ---
+.vscode/
+
+# --- OS files ---
+.DS_Store
+Thumbs.db

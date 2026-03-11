@@ -1,5 +1,9 @@
-numpy
-pandas
-scikit-learn
 fastapi
-uvicorn
+uvicorn[standard]
+numpy==1.23.5
+pandas
+scikit-learn==1.7.2
+tensorflow==2.11.0
+pydantic
+python-multipart
+joblib

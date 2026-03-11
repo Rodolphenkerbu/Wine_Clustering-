@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Wine Quality Predictor</title>
+
+    <!-- Chart.js for feature importance chart -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body { font-family: Arial; margin: 40px; }
+        .container { max-width: 900px; margin: auto; }
+        label { display: block; margin-top: 15px; }
+        input, select, textarea { width: 100%; padding: 8px; margin-top: 5px; }
+        button { margin-top: 20px; padding: 10px; }
+        #result { margin-top: 30px; font-size: 18px; }
+        .section { margin-top: 40px; padding-top: 20px; border-top: 1px solid #ccc; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { border: 1px solid #ddd; padding: 8px; font-size: 14px; }
+        th { background-color: #f4f4f4; text-align: left; }
+        .btn-primary { width: 100%; }
+        .btn-inline { margin-right: 10px; }
+        .collapsible { cursor: pointer; user-select: none; }
+        .collapsible:hover { color: #0077cc; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Wine Quality Predictor</h2>
+
+    <!-- ===============================================================
+         — Single Prediction Section
+         =============================================================== -->
+    <div class="section">
+        <h3>Single Prediction</h3>
+
+        <label>Log Price</label>
+        <input id="log_price" type="number" step="0.01">
+
+        <label>Clean Length</label>
+        <input id="clean_length" type="number">
+
+        <label>Sentiment</label>
+        <select id="sentiment_num">
+            <option value="-1">Negative (-1)</option>
+            <option value="0">Neutral (0)</option>
+            <option value="1">Positive (1)</option>
+        </select>
+
+        <label>Country</label>
+        <select id="country"></select>
+
+        <button id="predictBtn" class="btn-primary">Predict</button>
+
+        <!-- ===============================================================
+             — SHAP + LIME Buttons
+             =============================================================== -->
+        <button id="shapBtn" class="btn-inline">Explain with SHAP</button>
+        <button id="limeBtn" class="btn-inline">Explain with LIME</button>
+
+        <div id="result"></div>
+
+        <!-- ===============================================================
+             SHAP Collapsible Section
+             =============================================================== -->
+        <div class="section">
+            <h3 class="collapsible">SHAP Explanation ▼</h3>
+            <div id="shapOutput" class="content" style="display:none;"></div>
+        </div>
+
+        <!-- ===============================================================
+             LIME Collapsible Section
+             =============================================================== -->
+        <div class="section">
+            <h3 class="collapsible">LIME Explanation ▼</h3>
+            <div id="limeOutput" class="content" style="display:none;"></div>
+        </div>
+    </div>
+
+    <!-- ===============================================================
+         — Batch Prediction Section
+         =============================================================== -->
+    <div class="section">
+        <h3>Batch Prediction</h3>
+
+        <h4>Upload CSV file</h4>
+        <p style="font-size: 14px; color: #555;">
+            Expected columns: <code>log_price, clean_length, sentiment_num, country</code>
+        </p>
+        <input type="file" id="csvFile" accept=".csv">
+        <button id="csvUploadBtn" class="btn-inline">Run Batch from CSV</button>
+
+        <h4>Or paste JSON array</h4>
+        <textarea id="jsonBatchInput" rows="6"></textarea>
+
+        <button id="jsonBatchBtn" class="btn-inline">Run Batch from JSON</button>
+        <button id="clearBatchBtn" class="btn-inline" style="background:#eee;">Clear Batch Output</button>
+
+        <div id="batchResult"></div>
+        <table id="batchTable" style="display:none;">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Log Price</th>
+                    <th>Clean Length</th>
+                    <th>Sentiment</th>
+                    <th>Country</th>
+                    <th>Predicted Quality</th>
+                    <th>Confidence (%)</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <!-- ===============================================================
+         — Feature Importance Section
+         =============================================================== -->
+    <div class="section">
+        <h3>Feature Importance</h3>
+        <button id="loadImportanceBtn" class="btn-inline">Load Feature Importance</button>
+
+        <div style="width: 600px; margin-top: 20px;">
+            <canvas id="importanceChart"></canvas>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    /* ===============================================================
+       — Load Country Dropdown
+       =============================================================== */
+    const countries = [
+        "Armenia","Australia","Austria","Bosnia and Herzegovina","Brazil","Bulgaria",
+        "Canada","Chile","China","Croatia","Cyprus","Czech Republic","England",
+        "France","Georgia","Germany","Greece","Hungary","India","Israel","Italy",
+        "Lebanon","Luxembourg","Macedonia","Mexico","Moldova","Morocco",
+        "New Zealand","Peru","Portugal","Romania","Serbia","Slovenia",
+        "South Africa","Spain","Switzerland","Turkey","US","Ukraine","Uruguay"
+    ];
+
+    const countrySelect = document.getElementById("country");
+    countries.forEach(c => {
+        const opt = document.createElement("option");
+        opt.value = c;
+        opt.textContent = c;
+        countrySelect.appendChild(opt);
+    });
+
+    const qualityMap = { 0: "Low", 1: "Medium", 2: "High" };
+
+    /* ===============================================================
+       — API Endpoints
+       =============================================================== */
+    const BASE = "https://musical-lamp-x5pgv69gr57v36gwp-8000.app.github.dev";
+    const API_SINGLE = BASE + "/predict_fnn_uncertainty";
+    const API_BATCH  = BASE + "/predict_fnn_batch";
+    const API_IMPORTANCE = BASE + "/fnn_feature_importance";
+    const API_SHAP = BASE + "/explain_shap_single";
+    const API_LIME = BASE + "/explain_lime_single";
+
+    /* ===============================================================
+       — Single Prediction Handler
+       =============================================================== */
+    document.getElementById("predictBtn").onclick = async () => {
+        const payload = {
+            log_price: parseFloat(document.getElementById("log_price").value),
+            clean_length: parseFloat(document.getElementById("clean_length").value),
+            sentiment_num: parseInt(document.getElementById("sentiment_num").value),
+            country: document.getElementById("country").value
+        };
+
+        try {
+            const res = await fetch(API_SINGLE, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await res.json();
+
+            document.getElementById("result").innerHTML = `
+                <strong>Predicted Quality:</strong> ${data.predicted_quality}<br>
+                <strong>Uncertainty:</strong> ${data.uncertainty}<br>
+                <strong>Confidence Interval:</strong> ${data.confidence_interval}
+            `;
+        } catch (err) {
+            document.getElementById("result").innerHTML =
+                "<span style='color:red'>Error: " + err + "</span>";
+        }
+    };
+
+    /* ===============================================================
+       — SHAP + LIME Input Collector
+       =============================================================== */
+    async function getInputPayload() {
+        return {
+            log_price: parseFloat(document.getElementById("log_price").value),
+            clean_length: parseFloat(document.getElementById("clean_length").value),
+            sentiment_num: parseInt(document.getElementById("sentiment_num").value),
+            country: document.getElementById("country").value
+        };
+    }
+
+    /* ===============================================================
+       — SHAP API Call
+       =============================================================== */
+    async function explainWithSHAP() {
+        const payload = await getInputPayload();
+
+        const response = await fetch(API_SHAP, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+
+        const data = await response.json();
+        renderSHAP(data);
+    }
+
+    /* ===============================================================
+       — LIME API Call
+       =============================================================== */
+    async function explainWithLIME() {
+        const payload = await getInputPayload();
+
+        const response = await fetch(API_LIME, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+
+        const data = await response.json();
+        renderLIME(data);
+    }
+
+    /* ===============================================================
+       — SHAP Renderer (Horizontal Bars)
+       =============================================================== */
+    function renderSHAP(data) {
+        const container = document.getElementById("shapOutput");
+        container.innerHTML = "";
+
+        const shapValues = data.shap_values[0];
+        const features = data.feature_names;
+
+        let html = "<div>";
+
+        for (let i = 0; i < shapValues.length; i++) {
+            const value = shapValues[i];
+            const feature = features[i];
+
+            html += `
+                <div style="margin: 6px 0;">
+                    <strong>${feature}</strong>
+                    <div style="height: 10px; background: #ddd;">
+                        <div style="
+                            width: ${Math.abs(value) * 300}px;
+                            background: ${value >= 0 ? '#4CAF50' : '#F44336'};
+                            height: 10px;">
+                        </div>
+                    </div>
+                    <span>${value.toFixed(4)}</span>
+                </div>
+            `;
+        }
+
+        html += "</div>";
+        container.innerHTML += html;
+    }
+
+    /* ===============================================================
+       — LIME Renderer (Table)
+       =============================================================== */
+    function renderLIME(data) {
+        const container = document.getElementById("limeOutput");
+        container.innerHTML = "";
+
+        let html = `
+            <table border="1" cellpadding="6">
+                <tr>
+                    <th>Feature</th>
+                    <th>Weight</th>
+                </tr>
+        `;
+
+        data.explanation.forEach(item => {
+            html += `
+                <tr>
+                    <td>${item.feature}</td>
+                    <td>${item.weight.toFixed(4)}</td>
+                </tr>
+            `;
+        });
+
+        html += "</table>";
+        container.innerHTML += html;
+    }
+
+    /* ===============================================================
+       — SHAP + LIME Button Listeners
+       =============================================================== */
+    document.getElementById("shapBtn").addEventListener("click", explainWithSHAP);
+    document.getElementById("limeBtn").addEventListener("click", explainWithLIME);
+
+    /* ===============================================================
+       — Normalize Batch Response
+       =============================================================== */
+    function normalizeBatchResponse(data) {
+        let predictions = [];
+
+        if (Array.isArray(data)) {
+            predictions = data.map(d => ({
+                prediction: d.prediction ?? d.quality ?? d.label ?? d[0],
+                confidence: d.confidence ?? d.confidence_score ?? d.prob ?? d[1]
+            }));
+        } else if (data.predictions && data.confidences) {
+            predictions = data.predictions.map((p, i) => ({
+                prediction: p,
+                confidence: data.confidences[i]
+            }));
+        } else if (data.predictions) {
+            predictions = data.predictions.map(p => ({
+                prediction: p,
+                confidence: 1.0
+            }));
+        } else {
+            console.error("Unexpected batch response format:", data);
+        }
+
+        return predictions;
+    }
+
+    /* ===============================================================
+       — Render Batch Table
+       =============================================================== */
+    function renderBatchTable(items, predictions) {
+        const table = document.getElementById("batchTable");
+        const tbody = table.querySelector("tbody");
+        tbody.innerHTML = "";
+
+        items.forEach((item, idx) => {
+            const pred = predictions[idx];
+            const tr = document.createElement("tr");
+
+            const predictedLabel = qualityMap[pred.prediction] ?? "N/A";
+            const confidencePercent = pred.confidence != null
+                ? (pred.confidence * 100).toFixed(1)
+                : "N/A";
+
+            tr.innerHTML = `
+                <td>${idx + 1}</td>
+                <td>${item.log_price}</td>
+                <td>${item.clean_length}</td>
+                <td>${item.sentiment_num}</td>
+                <td>${item.country}</td>
+                <td>${predictedLabel}</td>
+                <td>${confidencePercent}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+
+        table.style.display = "table";
+    }
+
+    /* ===============================================================
+       — CSV → JSON Parser
+       =============================================================== */
+    function parseCsvToItems(csvText) {
+        const lines = csvText.trim().split(/\r?\n/);
+        const header = lines[0].split(",").map(h => h.trim());
+
+        const idxLogPrice = header.indexOf("log_price");
+        const idxCleanLen = header.indexOf("clean_length");
+        const idxSentiment = header.indexOf("sentiment_num");
+        const idxCountry = header.indexOf("country");
+
+        const items = [];
+        for (let i = 1; i < lines.length; i++) {
+            const cols = lines[i].split(",").map(c => c.trim());
+            items.push({
+                log_price: parseFloat(cols[idxLogPrice]),
+                clean_length: parseFloat(cols[idxCleanLen]),
+                sentiment_num: parseInt(cols[idxSentiment]),
+                country: cols[idxCountry]
+            });
+        }
+        return items;
+    }
+
+    /* ===============================================================
+       — Batch from CSV
+       =============================================================== */
+    document.getElementById("csvUploadBtn").onclick = async () => {
+        const file = document.getElementById("csvFile").files[0];
+        if (!file) return;
+
+        const text = await file.text();
+        const items = parseCsvToItems(text);
+
+        const res = await fetch(API_BATCH, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ items })
+        });
+
+        const data = await res.json();
+        const predictions = normalizeBatchResponse(data);
+        renderBatchTable(items, predictions);
+    };
+
+    /* ===============================================================
+       — Batch from JSON Textarea
+       =============================================================== */
+    document.getElementById("jsonBatchBtn").onclick = async () => {
+        const txt = document.getElementById("jsonBatchInput").value.trim();
+        if (!txt) return;
+
+        const arr = JSON.parse(txt);
+        const items = arr.map(x => ({
+            log_price: parseFloat(x.log_price),
+            clean_length: parseFloat(x.clean_length),
+            sentiment_num: parseInt(x.sentiment_num),
+            country: x.country
+        }));
+
+        const res = await fetch(API_BATCH, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ items })
+        });
+
+        const data = await res.json();
+        const predictions = normalizeBatchResponse(data);
+        renderBatchTable(items, predictions);
+    };
+
+    /* ===============================================================
+       — Clear Batch Output + Clear Chart
+       =============================================================== */
+    document.getElementById("clearBatchBtn").onclick = () => {
+        document.getElementById("batchResult").innerHTML = "";
+        document.getElementById("batchTable").style.display = "none";
+        document.getElementById("batchTable").querySelector("tbody").innerHTML = "";
+        document.getElementById("jsonBatchInput").value = "";
+
+        if (importanceChart) {
+            importanceChart.destroy();
+            importanceChart = null;
+        }
+    };
+
+    /* ===============================================================
+       — Feature Importance Chart
+       =============================================================== */
+    let importanceChart = null;
+
+    document.getElementById("loadImportanceBtn").onclick = async () => {
+        try {
+            const res = await fetch(API_IMPORTANCE);
+            const data = await res.json();
+
+            const labels = data.features;
+            const values = data.importances;
+
+            if (importanceChart) {
+                importanceChart.destroy();
+            }
+
+            const ctx = document.getElementById("importanceChart").getContext("2d");
+
+            importanceChart = new Chart(ctx, {
+                type: "bar",
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: "Feature Importance",
+                        data: values,
+                        backgroundColor: "rgba(75, 192, 192, 0.6)",
+                        borderColor: "rgba(75, 192, 192, 1)",
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: { display: true, text: "Importance Score" }
+                        },
+                        x: {
+                            title: { display: true, text: "Features" }
+                        }
+                    }
+                }
+            });
+
+        } catch (err) {
+            console.error(err);
+            alert("Error loading feature importance.");
+        }
+    };
+
+    /* ===============================================================
+       — Collapsible Section Toggle
+       =============================================================== */
+    document.querySelectorAll(".collapsible").forEach(header => {
+        header.addEventListener("click", () => {
+            const content = header.nextElementSibling;
+            const isVisible = content.style.display === "block";
+
+            content.style.display = isVisible ? "none" : "block";
+
+            header.textContent = header.textContent.replace(
+                isVisible ? "▲" : "▼",
+                isVisible ? "▼" : "▲"
+            );
+        });
+    });
+</script>
+
+</body>
+</html>
